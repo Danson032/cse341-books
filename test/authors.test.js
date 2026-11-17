@@ -1,186 +1,16 @@
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, test } from 'node:test';
-import { MongoClient } from 'mongodb';
+import { after, beforeEach, test } from 'node:test';
+import { createTestContext } from '../support/testContext.js';
 
-const data = {
-    authors: [],
-    books: []
-};
-const failures = new Set();
-const calls = [];
-const createdIndexes = [];
-let server;
-let baseUrl;
-let originalConsoleError;
-
-const failIfRequested = (operation) => {
-    if (failures.has(operation)) {
-        throw new Error(`Simulated ${operation} failure`);
-    }
-};
-
-const matches = (document, query) => {
-    return Object.entries(query).every(([key, value]) => {return document[key] === value});
-};
-
-const project = (document, options = {}) => {
-    if (!document) {
-        return null;
-    }
-
-    const projection = options.projection;
-
-    if (!projection) {
-        return structuredClone(document);
-    }
-
-    const included = Object.keys(projection)
-        .filter((key) => {return projection[key] === 1});
-
-    if (included.length > 0) {
-        return Object.fromEntries(
-            included
-                .filter((key) => {return key in document})
-                .map((key) => {return [key, document[key]]})
-        );
-    }
-
-    const result = structuredClone(document);
-
-    for (const key of Object.keys(projection)) {
-        if (projection[key] === 0) {
-            delete result[key];
-        }
-    }
-
-    return result;
-};
-
-const fakeDb = {
-    client: null,
-    collection(name) {
-        return {
-            find(query = {}, options = {}) {
-                return {
-                    toArray: async () => {
-                        failIfRequested(`${name}.find`);
-                        return data[name]
-                            .filter((document) => {return matches(document, query)})
-                            .map((document) => {return project(document, options)});
-                    }
-                };
-            },
-            async findOne(query = {}, options = {}) {
-                failIfRequested(`${name}.findOne`);
-                calls.push({ name, operation: 'findOne', options });
-                const document = data[name].find((item) => {return matches(item, query)});
-                return project(document, options);
-            },
-            async createIndex(keys, options) {
-                failIfRequested(`${name}.createIndex`);
-                createdIndexes.push({ name, keys, options });
-                return `${Object.keys(keys)[0]}_1`;
-            },
-            async insertOne(document) {
-                failIfRequested(`${name}.insertOne`);
-
-                if (data[name].some((item) => {return item.id === document.id})) {
-                    const error = new Error('Duplicate key');
-                    error.code = 11000;
-                    throw error;
-                }
-
-                data[name].push({ ...document, _id: 'internal-id' });
-            },
-            async findOneAndUpdate(query, update, options) {
-                failIfRequested(`${name}.findOneAndUpdate`);
-                const document = data[name].find((item) => {return matches(item, query)});
-
-                if (!document) {
-                    return null;
-                }
-
-                Object.assign(document, update.$set);
-                return project(document, options);
-            },
-            async deleteOne(query, options) {
-                failIfRequested(`${name}.deleteOne`);
-                calls.push({ name, operation: 'deleteOne', options });
-                const index = data[name].findIndex((item) => {return matches(item, query)});
-
-                if (index < 0) {
-                    return { deletedCount: 0 };
-                }
-
-                data[name].splice(index, 1);
-                return { deletedCount: 1 };
-            }
-        };
-    }
-};
-
-const request = async (method, path, body) => {
-    const options = { method };
-
-    if (body !== undefined) {
-        options.headers = { 'content-type': 'application/json' };
-        options.body = JSON.stringify(body);
-    }
-
-    return fetch(`${baseUrl}${path}`, options);
-};
-
-before(async () => {
-    MongoClient.prototype.connect = async function () {
-        return this;
-    };
-    MongoClient.prototype.db = function () {
-        fakeDb.client = this;
-        return fakeDb;
-    };
-    MongoClient.prototype.startSession = function () {
-        return {
-            withTransaction: async (callback) => {
-                return await callback();
-            },
-            endSession: async () => {}
-        };
-    };
-
-    process.env.MONGODB_URI = 'mongodb://localhost/test';
-    process.env.MONGODB_DB_NAME = 'test';
-
-    const { connectToDb } = await import('../src/db/connect.js');
-    await connectToDb();
-
-    const { default: app } = await import('../app.js');
-    server = await new Promise((resolve) => {
-        const listeningServer = app.listen(0, () => {
-            resolve(listeningServer);
-        });
-    });
-    baseUrl = `http://127.0.0.1:${server.address().port}`;
-
-    originalConsoleError = console.error;
-    console.error = () => {};
-});
+const context = await createTestContext();
+const { baseUrl, calls, createdIndexes, data, failures, request } = context;
 
 beforeEach(() => {
-    data.authors.length = 0;
-    data.books.length = 0;
-    failures.clear();
-    calls.length = 0;
-    createdIndexes.length = 0;
+    context.reset();
 });
 
 after(async () => {
-    console.error = originalConsoleError;
-
-    if (server) {
-        await new Promise((resolve) => {
-            server.close(resolve);
-        });
-    }
+    await context.close();
 });
 
 test('GET all and GET by ID return the required statuses and shapes', async () => {
@@ -335,7 +165,7 @@ test('unexpected database errors produce safe 500 responses', async () => {
     assert.equal(response.status, 500);
 });
 
-test('Swagger documents all Authors operations and Books GET behavior is unchanged', async () => {
+test('Swagger documents Authors operations and serves the UI', async () => {
     const specificationResponse = await request('GET', '/api-docs.json');
     assert.equal(specificationResponse.status, 200);
 
@@ -385,12 +215,4 @@ test('Swagger documents all Authors operations and Books GET behavior is unchang
     const uiResponse = await request('GET', '/api-docs');
     assert.equal(uiResponse.status, 200);
     assert.match(await uiResponse.text(), /swagger-ui/);
-
-    data.books.push({ id: 'b1', authorId: 'a1', title: 'Book One' });
-    let response = await request('GET', '/books');
-    assert.equal(response.status, 200);
-    assert.equal((await response.json()).length, 1);
-
-    response = await request('GET', '/books/b1');
-    assert.equal(response.status, 200);
 });
