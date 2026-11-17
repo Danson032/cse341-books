@@ -3,7 +3,10 @@ import express from 'express';
 
 import {
     getBooksHandler,
-    getBookByIdHandler
+    getBookByIdHandler,
+    createBookHandler,
+    updateBookHandler,
+    deleteBookHandler
 } from './controllers/books.js';
 
 import {
@@ -19,6 +22,9 @@ const router = express.Router();
 // Book routes
 router.get('/books', getBooksHandler);
 router.get('/books/:id', getBookByIdHandler);
+router.post('/books', createBookHandler);
+router.put('/books/:id', updateBookHandler);
+router.delete('/books/:id', deleteBookHandler);
 
 // Author routes
 router.get('/authors', getAuthorsHandler);

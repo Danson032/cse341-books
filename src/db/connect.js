@@ -15,10 +15,14 @@ const connectToDb = async () => {
     }
 
     const client = new MongoClient(connectionString);
-
     await client.connect();
 
-    database = client.db(databaseName);
+    const connectedDatabase = client.db(databaseName);
+    await connectedDatabase
+        .collection('books')
+        .createIndex({ id: 1 }, { unique: true });
+
+    database = connectedDatabase;
 
     return database;
 };
